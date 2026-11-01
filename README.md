@@ -14,27 +14,16 @@ Untuk memakai aplikasi dari perangkat lain dalam jaringan lokal yang dipercaya, 
 
 ## Membuka online dengan GitHub Pages
 
-GitHub Pages hanya meng-host tampilan statis; API Node.js dan database tetap harus berjalan terpisah. Konfigurasi repository ini menggunakan GitHub Pages untuk tampilan, Render Free untuk API, dan Neon Free untuk penyimpanan PostgreSQL. Kedua layanan gratis dapat memiliki batas pemakaian dan waktu henti; Render dapat menidurkan server yang tidak aktif, sehingga penghuni mungkin perlu menunggu server aktif kembali sebelum login. Data tetap disimpan di Neon, bukan di filesystem sementara Render.
+Konfigurasi gratis ini memakai GitHub Pages untuk tampilan, Netlify Functions untuk API, dan Neon Free untuk PostgreSQL. API berjalan sebagai fungsi serverless; data kos dan sesi login disimpan di Neon agar tetap ada saat fungsi serverless dimulai ulang. Paket gratis memiliki batas pemakaian bulanan.
 
-1. Buat database PostgreSQL gratis di Neon, lalu salin connection string pooled dari dashboard Neon. Simpan string koneksi secara privat.
-2. Di Render, pilih **New > Blueprint**, hubungkan repository `gansboyy8/projek-kos`, dan gunakan `render.yaml`. Saat diminta, isi `DATABASE_URL` dengan connection string Neon. Tunggu layanan `ruangkos-backend` selesai deploy, lalu salin URL HTTPS-nya, misalnya `https://ruangkos-backend.onrender.com`.
-3. Jika ingin mempertahankan data lokal, migrasikan sebelum membuat akun owner online. Di PowerShell, jalankan perintah berikut dari folder proyek dan masukkan connection string Neon saat diminta. Perintah migrasi mengganti isi database tujuan dengan data lokal, termasuk akun owner dan hash password:
+1. Buat database PostgreSQL gratis di Neon. Di project Neon, klik **Connect**, pilih branch `production`, database, role, dan connection pooling. Simpan connection string secara privat.
+2. Masuk/daftar di Netlify menggunakan GitHub, lalu pilih **Add new project > Import an existing project** dan hubungkan repository `gansboyy8/projek-kos`. Netlify akan memakai `netlify.toml` dan folder `netlify/functions`.
+3. Di pengaturan situs Netlify, buka **Environment variables** dan tambahkan `DATABASE_URL` berisi connection string Neon serta `FRONTEND_ORIGIN` berisi `https://gansboyy8.github.io`. Jalankan deploy/redeploy setelah keduanya disimpan.
+4. Setelah deploy selesai, salin domain Netlify, misalnya `https://nama-situs.netlify.app`.
+5. Di GitHub, buka **Settings > Secrets and variables > Actions > Variables** dan buat variable `RUANGKOS_API_URL` berisi domain Netlify tanpa garis miring di akhir.
+6. Pastikan **Settings > Pages** memilih **GitHub Actions**, lalu jalankan workflow **Deploy RuangKos to GitHub Pages** di tab **Actions**. Buka `https://gansboyy8.github.io/projek-kos/`.
 
-   ```powershell
-   $secret = Read-Host "DATABASE_URL Neon" -AsSecureString
-   $credential = New-Object System.Net.NetworkCredential("", $secret)
-   $env:DATABASE_URL = $credential.Password
-   node scripts/migrate-local-data.js --replace
-   Remove-Item Env:DATABASE_URL
-   Remove-Variable secret,credential
-   ```
-
-   Lewati migrasi untuk memulai dengan data online yang kosong.
-4. Di repository GitHub, buka **Settings > Secrets and variables > Actions > Variables**, lalu buat repository variable bernama `RUANGKOS_API_URL` dengan URL backend Render tadi (tanpa garis miring di akhir).
-5. Buka **Settings > Pages**, pilih **GitHub Actions** sebagai build and deployment source.
-6. Jalankan workflow **Deploy RuangKos to GitHub Pages** dari tab **Actions**, atau push perubahan baru. Buka `https://gansboyy8.github.io/projek-kos/`.
-
-Jangan masukkan `DATABASE_URL` ke GitHub Pages, file frontend, atau repository variable yang dipakai untuk build tampilan. URL backend bukan rahasia; password database harus tetap hanya berada di konfigurasi environment Render. Sesi login disimpan sementara di backend, jadi pengguna perlu login lagi jika layanan Render tidur atau restart.
+Jangan masukkan `DATABASE_URL` ke GitHub Pages atau file repository. URL API bukan rahasia; password database harus tetap hanya berada di environment Netlify. Untuk memulai dengan data online kosong, buka situs GitHub Pages setelah deploy selesai dan buat akun owner.
 
 ## Fitur
 

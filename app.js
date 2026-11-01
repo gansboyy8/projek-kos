@@ -78,7 +78,7 @@ let pendingProfilePhoto = null;
 
 async function apiRequest(url, options = {}) {
   if (!apiBaseUrl && window.location.hostname.endsWith(".github.io")) {
-    throw new Error("Backend belum dikonfigurasi untuk GitHub Pages. Atur variabel RUANGKOS_API_URL di GitHub Actions setelah backend Render aktif.");
+    throw new Error("Backend belum dikonfigurasi untuk GitHub Pages. Atur variabel RUANGKOS_API_URL di GitHub Actions setelah backend Netlify aktif.");
   }
   if (apiBaseUrl && window.location.protocol === "https:" && new URL(apiBaseUrl).protocol !== "https:") {
     throw new Error("GitHub Pages hanya dapat terhubung ke backend dengan HTTPS.");

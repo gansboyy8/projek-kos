@@ -64,6 +64,7 @@ async function loadStore() {
   if (process.env.DATABASE_URL) {
     database = new Pool({ connectionString: process.env.DATABASE_URL });
     await database.query("CREATE TABLE IF NOT EXISTS ruangkos_store (id boolean PRIMARY KEY DEFAULT true CHECK (id), payload jsonb NOT NULL)");
+    await database.query("CREATE TABLE IF NOT EXISTS ruangkos_sessions (token text PRIMARY KEY, payload jsonb NOT NULL, expires_at timestamptz NOT NULL)");
     const result = await database.query("SELECT payload FROM ruangkos_store WHERE id = true");
     if (result.rowCount) {
       store = result.rows[0].payload;
@@ -182,13 +183,22 @@ async function readJson(request) {
   }
 }
 
-function requestSession(request) {
+async function requestSession(request) {
   const cookie = request.headers.cookie || "";
   const authorization = request.headers.authorization || "";
   const token = authorization.startsWith("Bearer ")
     ? authorization.slice("Bearer ".length)
     : cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("ruangkos_session="))?.slice("ruangkos_session=".length);
-  const session = token ? sessions.get(token) : null;
+  if (!token) return null;
+  if (database) {
+    const result = await database.query(
+      "SELECT payload, expires_at FROM ruangkos_sessions WHERE token = $1 AND expires_at > NOW()",
+      [token]
+    );
+    if (!result.rowCount) return null;
+    return { ...result.rows[0].payload, expiresAt: new Date(result.rows[0].expires_at).getTime() };
+  }
+  const session = sessions.get(token);
   if (session?.expiresAt && session.expiresAt <= Date.now()) {
     sessions.delete(token);
     return null;
@@ -222,9 +232,19 @@ async function matchesPassword(password, account) {
   return expected.length === derived.length && crypto.timingSafeEqual(expected, derived);
 }
 
-function newSession(response, session) {
+async function newSession(response, session) {
   const token = crypto.randomBytes(32).toString("base64url");
-  sessions.set(token, { ...session, expiresAt: Date.now() + sessionLifetime });
+  const expiresAt = Date.now() + sessionLifetime;
+  if (database) {
+    await database.query("INSERT INTO ruangkos_sessions (token, payload, expires_at) VALUES ($1, $2::jsonb, $3)", [
+      token,
+      JSON.stringify(session),
+      new Date(expiresAt).toISOString()
+    ]);
+    await database.query("DELETE FROM ruangkos_sessions WHERE expires_at <= NOW()");
+  } else {
+    sessions.set(token, { ...session, expiresAt });
+  }
   const secure = process.env.COOKIE_SECURE === "1" || process.env.NODE_ENV === "production" ? "; Secure" : "";
   response.setHeader("Set-Cookie", `ruangkos_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${sessionLifetime / 1000}${secure}`);
   return token;
@@ -233,10 +253,15 @@ function newSession(response, session) {
 function applyCors(request, response) {
   const origin = request.headers.origin;
   const allowedOrigins = (process.env.FRONTEND_ORIGIN || "").split(",").map((value) => value.trim()).filter(Boolean);
-  if (origin && allowedOrigins.length && !allowedOrigins.includes(origin)) {
+  const forwardedHost = request.headers["x-forwarded-host"];
+  const requestHost = Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost || request.headers.host;
+  const forwardedProto = request.headers["x-forwarded-proto"];
+  const requestProto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto || (request.socket?.encrypted ? "https" : "http");
+  const sameOrigin = origin && requestHost && origin === `${requestProto}://${requestHost}`;
+  if (origin && !sameOrigin && !allowedOrigins.includes(origin)) {
     throw httpError(403, "Asal aplikasi tidak diizinkan mengakses API.");
   }
-  if (origin && (!allowedOrigins.length || allowedOrigins.includes(origin))) {
+  if (origin) {
     response.setHeader("Access-Control-Allow-Origin", origin);
     response.setHeader("Vary", "Origin");
     response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, OPTIONS");
@@ -316,7 +341,7 @@ async function updateOwnerState(input) {
 
 async function handleApi(request, response, pathname) {
   if (request.method === "GET" && pathname === "/api/session") {
-    const session = requestSession(request);
+    const session = await requestSession(request);
     return sendJson(response, 200, {
       authenticated: Boolean(session),
       ownerExists: Boolean(store.owner),
@@ -343,7 +368,7 @@ async function handleApi(request, response, pathname) {
     if (!store.owner.name || !store.owner.propertyName) throw httpError(400, "Nama kos dan owner harus diisi.");
     await persistStore();
     const session = { role: "owner" };
-    const token = newSession(response, session);
+    const token = await newSession(response, session);
     return sendJson(response, 201, { user: session, token });
   }
 
@@ -359,7 +384,7 @@ async function handleApi(request, response, pathname) {
       if (resident && await matchesPassword(input.password, resident)) user = { role: "resident", residentId: resident.id };
     }
     if (!user) throw httpError(401, "ID login atau password tidak cocok.");
-    const token = newSession(response, user);
+    const token = await newSession(response, user);
     return sendJson(response, 200, { user: publicSession(user), token });
   }
 
@@ -369,13 +394,16 @@ async function handleApi(request, response, pathname) {
     const token = authorization.startsWith("Bearer ")
       ? authorization.slice("Bearer ".length)
       : cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("ruangkos_session="))?.slice("ruangkos_session=".length);
-    if (token) sessions.delete(token);
+    if (token) {
+      sessions.delete(token);
+      if (database) await database.query("DELETE FROM ruangkos_sessions WHERE token = $1", [token]);
+    }
     response.setHeader("Set-Cookie", "ruangkos_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
     response.writeHead(204);
     return response.end();
   }
 
-  const session = requestSession(request);
+  const session = await requestSession(request);
   if (request.method === "GET" && pathname === "/api/state") {
     if (!session) throw httpError(401, "Sesi berakhir. Silakan masuk kembali.");
     return sendJson(response, 200, { data: publicState(session) });
@@ -503,6 +531,7 @@ async function handleApi(request, response, pathname) {
 
 async function handleRequest(request, response) {
   try {
+    await initialization;
     const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
     const pathname = decodeURIComponent(url.pathname);
     if (pathname.startsWith("/api/")) {
@@ -514,6 +543,7 @@ async function handleRequest(request, response) {
       if (request.method === "GET" && pathname === "/api/health") {
         return sendJson(response, 200, { status: "ok", storage: database ? "postgres" : "file" });
       }
+      if (database) await loadStore();
       return await handleApi(request, response, pathname);
     }
     if (request.method !== "GET" && request.method !== "HEAD") throw httpError(405, "Metode tidak diizinkan.");
@@ -539,12 +569,18 @@ async function handleRequest(request, response) {
   }
 }
 
-loadStore().then(() => {
-  http.createServer(handleRequest).listen(port, host, () => {
+const initialization = loadStore();
+
+if (require.main === module) {
+  initialization.then(() => {
+    http.createServer(handleRequest).listen(port, host, () => {
     console.log(`RuangKos berjalan di http://${host}:${port}`);
     console.log("Gunakan HTTPS melalui reverse proxy saat aplikasi diakses di luar jaringan lokal.");
+    });
+  }).catch((error) => {
+    console.error("Data RuangKos gagal dimuat:", error.message);
+    process.exitCode = 1;
   });
-}).catch((error) => {
-  console.error("Data RuangKos gagal dimuat:", error.message);
-  process.exitCode = 1;
-});
+} else {
+  module.exports = handleRequest;
+}
