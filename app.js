@@ -485,7 +485,7 @@ function renderPayments() {
     <div class="toolbar"><div class="toolbar-left"><label class="search-field"><span>⌕</span><input id="paymentSearch" type="search" placeholder="Cari nama atau metode pembayaran..." value="${escapeHtml(query)}"></label><select class="control" id="paymentFilter">${["Semua status", "Lunas", "Menunggu", "Terlambat"].map((status) => `<option ${filter === status ? "selected" : ""}>${status}</option>`).join("")}</select></div><span class="table-footer" style="padding:0;border:0">Lunas ditampilkan: <strong>${money(paid)}</strong></span></div>
     <section class="panel data-panel"><div class="table-wrap"><table class="data-table"><thead><tr><th>PENGHUNI</th><th>PERIODE SEWA</th><th>TANGGAL BAYAR</th><th>METODE</th><th>JUMLAH</th><th>STATUS</th><th></th></tr></thead><tbody>${payments.length ? payments.map((payment) => {
       const resident = getResident(payment.residentId);
-      return `<tr><td><div class="resident-cell">${avatar(resident?.name || "X")}<span><strong>${escapeHtml(resident?.name || "Penghuni dihapus")}</strong><small>Kamar ${escapeHtml(getRoom(resident?.roomId)?.name || "—")}</small></span></div></td><td class="cell-primary">${escapeHtml(formatMonth(payment.month))}</td><td>${formatDate(payment.date)}</td><td>${escapeHtml(payment.method)}</td><td class="cell-primary">${money(payment.amount)}</td><td>${statusPill(payment.status)}</td><td><div class="row-actions"><button class="row-action" data-action="edit-payment" data-id="${escapeHtml(payment.id)}">Edit</button><button class="row-action delete" data-action="delete-payment" data-id="${escapeHtml(payment.id)}">Hapus</button></div></td></tr>`;
+      return `<tr><td><div class="resident-cell">${avatar(resident?.name || "X")}<span><strong>${escapeHtml(resident?.name || "Penghuni dihapus")}</strong><small>Kamar ${escapeHtml(getRoom(resident?.roomId)?.name || "—")}</small></span></div></td><td class="cell-primary">${escapeHtml(formatMonth(payment.month))}</td><td>${formatDate(payment.date)}</td><td>${escapeHtml(payment.method)}</td><td class="cell-primary">${money(payment.amount)}</td><td>${statusPill(payment.status)}</td><td><div class="row-actions">${["Menunggu", "Menunggu konfirmasi"].includes(payment.status) ? `<button class="row-action" data-action="confirm-payment" data-id="${escapeHtml(payment.id)}">Konfirmasi lunas</button>` : ""}<button class="row-action" data-action="edit-payment" data-id="${escapeHtml(payment.id)}">Edit</button><button class="row-action delete" data-action="delete-payment" data-id="${escapeHtml(payment.id)}">Hapus</button></div></td></tr>`;
     }).join("") : `<tr><td colspan="7"><div class="empty-state"><strong>Belum ada catatan pembayaran</strong>Catat pembayaran pertama untuk melihat riwayat sewa.</div></td></tr>`}</tbody></table></div><div class="table-footer"><span>Termasuk semua periode</span><strong>${payments.length} transaksi</strong></div></section>`;
 }
 
@@ -871,6 +871,19 @@ async function confirmBill(id) {
   }
 }
 
+async function confirmPayment(id) {
+  const payment = data.payments.find((item) => item.id === id);
+  if (!payment || !["Menunggu", "Menunggu konfirmasi"].includes(payment.status)) {
+    toast("Pembayaran ini tidak sedang menunggu konfirmasi.");
+    return;
+  }
+  payment.status = "Lunas";
+  payment.date = today();
+  if (!await saveData()) return;
+  renderPage();
+  toast("Pembayaran dikonfirmasi dan dicatat lunas.");
+}
+
 function exportReport() {
   const payments = data.payments.filter((payment) => payment.month === reportMonth);
   const expenses = data.expenses.filter((expense) => expense.date.slice(0, 7) === reportMonth);
@@ -912,6 +925,7 @@ pageContent.addEventListener("click", (event) => {
   else if (target.dataset.action === "delete-bill") deleteRecord("bill", target.dataset.id);
   else if (target.dataset.action === "pay-bill") openModal("bill-payment", target.dataset.id);
   else if (target.dataset.action === "confirm-bill") confirmBill(target.dataset.id);
+  else if (target.dataset.action === "confirm-payment") confirmPayment(target.dataset.id);
   else if (verb === "add") openModal(kind);
   else if (verb === "edit") openModal(kind, target.dataset.id);
   else if (verb === "delete") deleteRecord(kind, target.dataset.id);
