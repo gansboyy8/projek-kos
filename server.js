@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { promisify } = require("node:util");
+const { Pool } = require("pg");
 
 const root = __dirname;
 const dataDirectory = path.join(root, "data");
@@ -21,6 +22,7 @@ const contentTypes = {
   ".svg": "image/svg+xml"
 };
 let store;
+let database;
 
 function currentDate() {
   return new Date().toISOString().slice(0, 10);
@@ -59,6 +61,20 @@ function seedData() {
 }
 
 async function loadStore() {
+  if (process.env.DATABASE_URL) {
+    database = new Pool({ connectionString: process.env.DATABASE_URL });
+    await database.query("CREATE TABLE IF NOT EXISTS ruangkos_store (id boolean PRIMARY KEY DEFAULT true CHECK (id), payload jsonb NOT NULL)");
+    const result = await database.query("SELECT payload FROM ruangkos_store WHERE id = true");
+    if (result.rowCount) {
+      store = result.rows[0].payload;
+      store.bills = Array.isArray(store.bills) ? store.bills : [];
+      store.maintenanceReports = Array.isArray(store.maintenanceReports) ? store.maintenanceReports : [];
+      return;
+    }
+    store = { ...seedData(), owner: null };
+    await persistStore();
+    return;
+  }
   try {
     store = JSON.parse(await fs.promises.readFile(storePath, "utf8"));
     store.bills = Array.isArray(store.bills) ? store.bills : [];
@@ -70,6 +86,13 @@ async function loadStore() {
 }
 
 async function persistStore() {
+  if (database) {
+    await database.query(
+      "INSERT INTO ruangkos_store (id, payload) VALUES (true, $1::jsonb) ON CONFLICT (id) DO UPDATE SET payload = EXCLUDED.payload",
+      [JSON.stringify(store)]
+    );
+    return;
+  }
   await fs.promises.mkdir(dataDirectory, { recursive: true });
   const temporaryPath = `${storePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
   await fs.promises.writeFile(temporaryPath, JSON.stringify(store, null, 2), { mode: 0o600 });
@@ -161,7 +184,10 @@ async function readJson(request) {
 
 function requestSession(request) {
   const cookie = request.headers.cookie || "";
-  const token = cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("ruangkos_session="))?.slice("ruangkos_session=".length);
+  const authorization = request.headers.authorization || "";
+  const token = authorization.startsWith("Bearer ")
+    ? authorization.slice("Bearer ".length)
+    : cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("ruangkos_session="))?.slice("ruangkos_session=".length);
   const session = token ? sessions.get(token) : null;
   if (session?.expiresAt && session.expiresAt <= Date.now()) {
     sessions.delete(token);
@@ -199,8 +225,24 @@ async function matchesPassword(password, account) {
 function newSession(response, session) {
   const token = crypto.randomBytes(32).toString("base64url");
   sessions.set(token, { ...session, expiresAt: Date.now() + sessionLifetime });
-  const secure = process.env.COOKIE_SECURE === "1" ? "; Secure" : "";
+  const secure = process.env.COOKIE_SECURE === "1" || process.env.NODE_ENV === "production" ? "; Secure" : "";
   response.setHeader("Set-Cookie", `ruangkos_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${sessionLifetime / 1000}${secure}`);
+  return token;
+}
+
+function applyCors(request, response) {
+  const origin = request.headers.origin;
+  const allowedOrigins = (process.env.FRONTEND_ORIGIN || "").split(",").map((value) => value.trim()).filter(Boolean);
+  if (origin && allowedOrigins.length && !allowedOrigins.includes(origin)) {
+    throw httpError(403, "Asal aplikasi tidak diizinkan mengakses API.");
+  }
+  if (origin && (!allowedOrigins.length || allowedOrigins.includes(origin))) {
+    response.setHeader("Access-Control-Allow-Origin", origin);
+    response.setHeader("Vary", "Origin");
+    response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, OPTIONS");
+    response.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+    response.setHeader("Access-Control-Max-Age", "600");
+  }
 }
 
 setInterval(() => {
@@ -301,8 +343,8 @@ async function handleApi(request, response, pathname) {
     if (!store.owner.name || !store.owner.propertyName) throw httpError(400, "Nama kos dan owner harus diisi.");
     await persistStore();
     const session = { role: "owner" };
-    newSession(response, session);
-    return sendJson(response, 201, { user: session });
+    const token = newSession(response, session);
+    return sendJson(response, 201, { user: session, token });
   }
 
   if (request.method === "POST" && pathname === "/api/login") {
@@ -317,13 +359,16 @@ async function handleApi(request, response, pathname) {
       if (resident && await matchesPassword(input.password, resident)) user = { role: "resident", residentId: resident.id };
     }
     if (!user) throw httpError(401, "ID login atau password tidak cocok.");
-    newSession(response, user);
-    return sendJson(response, 200, { user: publicSession(user) });
+    const token = newSession(response, user);
+    return sendJson(response, 200, { user: publicSession(user), token });
   }
 
   if (request.method === "POST" && pathname === "/api/logout") {
     const cookie = request.headers.cookie || "";
-    const token = cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("ruangkos_session="))?.slice("ruangkos_session=".length);
+    const authorization = request.headers.authorization || "";
+    const token = authorization.startsWith("Bearer ")
+      ? authorization.slice("Bearer ".length)
+      : cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("ruangkos_session="))?.slice("ruangkos_session=".length);
     if (token) sessions.delete(token);
     response.setHeader("Set-Cookie", "ruangkos_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
     response.writeHead(204);
@@ -460,7 +505,17 @@ async function handleRequest(request, response) {
   try {
     const url = new URL(request.url, `http://${request.headers.host || "localhost"}`);
     const pathname = decodeURIComponent(url.pathname);
-    if (pathname.startsWith("/api/")) return await handleApi(request, response, pathname);
+    if (pathname.startsWith("/api/")) {
+      applyCors(request, response);
+      if (request.method === "OPTIONS") {
+        response.writeHead(204);
+        return response.end();
+      }
+      if (request.method === "GET" && pathname === "/api/health") {
+        return sendJson(response, 200, { status: "ok", storage: database ? "postgres" : "file" });
+      }
+      return await handleApi(request, response, pathname);
+    }
     if (request.method !== "GET" && request.method !== "HEAD") throw httpError(405, "Metode tidak diizinkan.");
     const requestedPath = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
     const filePath = path.resolve(root, requestedPath);

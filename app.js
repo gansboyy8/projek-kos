@@ -1,4 +1,6 @@
 const STORAGE_KEY = "ruangkos-data-v1";
+const SESSION_KEY = "ruangkos-session-v1";
+const apiBaseUrl = String(window.RUANGKOS_API_URL || "").replace(/\/+$/, "");
 const pageContent = document.getElementById("pageContent");
 const modalBackdrop = document.getElementById("modalBackdrop");
 const modalForm = document.getElementById("modalForm");
@@ -75,11 +77,24 @@ let ownerExists = false;
 let pendingProfilePhoto = null;
 
 async function apiRequest(url, options = {}) {
-  const response = await fetch(url, {
+  if (!apiBaseUrl && window.location.hostname.endsWith(".github.io")) {
+    throw new Error("Backend belum dikonfigurasi untuk GitHub Pages. Atur variabel RUANGKOS_API_URL di GitHub Actions setelah backend Render aktif.");
+  }
+  if (apiBaseUrl && window.location.protocol === "https:" && new URL(apiBaseUrl).protocol !== "https:") {
+    throw new Error("GitHub Pages hanya dapat terhubung ke backend dengan HTTPS.");
+  }
+  const headers = { "Content-Type": "application/json", ...options.headers };
+  const token = sessionStorage.getItem(SESSION_KEY);
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(`${apiBaseUrl}${url}`, {
+    ...options,
     credentials: "same-origin",
-    headers: { "Content-Type": "application/json", ...options.headers },
-    ...options
+    headers
   });
+  const contentType = response.headers.get("content-type") || "";
+  if (response.status !== 204 && !contentType.includes("application/json")) {
+    throw new Error("Server API tidak mengirim respons JSON. Periksa URL backend RuangKos.");
+  }
   const result = response.status === 204 ? null : await response.json();
   if (!response.ok) throw new Error(result?.error || `Permintaan gagal (${response.status}).`);
   return result;
@@ -979,6 +994,7 @@ async function logout() {
     console.error("Sesi gagal ditutup di server.", error);
   }
   currentUser = null;
+  sessionStorage.removeItem(SESSION_KEY);
   ownerExists = true;
   closeModal();
   loginRole = "owner";
@@ -1005,6 +1021,7 @@ document.getElementById("authScreen").addEventListener("submit", async (event) =
         method: "POST",
         body: JSON.stringify({ ...values, initialData: data })
       });
+      sessionStorage.setItem(SESSION_KEY, result.token);
       currentUser = result.user;
       ownerExists = true;
       data = (await apiRequest("/api/state")).data;
@@ -1017,6 +1034,7 @@ document.getElementById("authScreen").addEventListener("submit", async (event) =
       method: "POST",
       body: JSON.stringify({ role: loginRole, loginId: values.loginId, password: values.password })
     });
+    sessionStorage.setItem(SESSION_KEY, result.token);
     currentUser = result.user;
     ownerExists = true;
     data = (await apiRequest("/api/state")).data;
@@ -1039,11 +1057,14 @@ async function bootstrap() {
     if (currentUser) {
       data = (await apiRequest("/api/state")).data;
       showApp();
-    } else renderAuth();
+    } else {
+      sessionStorage.removeItem(SESSION_KEY);
+      renderAuth();
+    }
   } catch (error) {
     console.error("Tidak dapat terhubung ke server RuangKos.", error);
     document.getElementById("authScreen").hidden = false;
-    document.getElementById("authScreen").innerHTML = `<section class="auth-card"><a class="brand auth-brand" href="#"><span class="brand-mark"><span></span><span></span><span></span><span></span></span><span class="brand-copy"><strong>ruang<span>kos</span></strong><small>PROPERTY MANAGER</small></span></a><span class="eyebrow">KONEKSI SERVER</span><h1>Aplikasi belum terhubung</h1><p class="auth-description">${escapeHtml(error.message)} Pastikan server RuangKos sedang berjalan, lalu muat ulang halaman.</p></section>`;
+    document.getElementById("authScreen").innerHTML = `<section class="auth-card"><a class="brand auth-brand" href="#"><span class="brand-mark"><span></span><span></span><span></span><span></span></span><span class="brand-copy"><strong>ruang<span>kos</span></strong><small>PROPERTY MANAGER</small></span></a><span class="eyebrow">KONEKSI SERVER</span><h1>Aplikasi belum terhubung</h1><p class="auth-description">${escapeHtml(error.message)} Periksa konfigurasi backend lalu muat ulang halaman.</p></section>`;
   }
 }
 

@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: ruangkos-backend
+    runtime: node
+    plan: free
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FRONTEND_ORIGIN
+        value: https://gansboyy8.github.io
+      - key: DATABASE_URL
+        sync: false
