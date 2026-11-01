@@ -114,13 +114,17 @@ function safeResident(resident) {
 
 function publicState(session) {
   const owner = safeOwner(store.owner);
+  const publicBills = (bills) => bills.map((bill) => {
+    const { paymentProof, ...publicBill } = bill;
+    return { ...publicBill, hasPaymentProof: Boolean(paymentProof) };
+  });
   if (session.role === "owner") {
     return {
       rooms: store.rooms,
       residents: store.residents.map(safeResident),
       payments: store.payments,
       expenses: store.expenses,
-      bills: store.bills,
+      bills: publicBills(store.bills),
       maintenanceReports: store.maintenanceReports,
       owner
     };
@@ -133,7 +137,7 @@ function publicState(session) {
     residents: [safeResident(resident)],
     payments: store.payments.filter((payment) => payment.residentId === resident.id),
     expenses: [],
-    bills: store.bills.filter((bill) => bill.residentId === resident.id),
+    bills: publicBills(store.bills.filter((bill) => bill.residentId === resident.id)),
     maintenanceReports: store.maintenanceReports.filter((report) => report.residentId === resident.id),
     owner
   };
@@ -143,20 +147,29 @@ function normalizedLogin(value) {
   return String(value || "").trim().toLowerCase();
 }
 
-function validateProfilePhoto(value) {
-  if (value === null || value === "") return null;
-  if (typeof value !== "string") throw httpError(400, "Foto profil tidak valid.");
+function validateImageDataUrl(value, label) {
+  if (typeof value !== "string") throw httpError(400, `${label} tidak valid.`);
   const match = value.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/);
-  if (!match) throw httpError(400, "Gunakan foto JPG, PNG, atau WebP.");
+  if (!match) throw httpError(400, `Gunakan ${label.toLowerCase()} JPG, PNG, atau WebP.`);
   const bytes = Buffer.from(match[2], "base64");
-  if (!bytes.length || bytes.length > 1024 * 1024) throw httpError(413, "Ukuran foto maksimal 1 MB.");
+  if (!bytes.length || bytes.length > 1024 * 1024) throw httpError(413, `Ukuran ${label.toLowerCase()} maksimal 1 MB.`);
   const validSignature = match[1] === "image/png"
     ? bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
     : match[1] === "image/jpeg"
       ? bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255
       : bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP";
-  if (!validSignature) throw httpError(400, "Format isi foto tidak sesuai dengan jenis berkasnya.");
+  if (!validSignature) throw httpError(400, `Format isi ${label.toLowerCase()} tidak sesuai dengan jenis berkasnya.`);
   return value;
+}
+
+function validateProfilePhoto(value) {
+  if (value === null || value === "") return null;
+  return validateImageDataUrl(value, "Foto profil");
+}
+
+function validatePaymentProof(value) {
+  if (typeof value !== "string") throw httpError(400, "Lampiran bukti pembayaran wajib dipilih.");
+  return validateImageDataUrl(value, "Bukti pembayaran");
 }
 
 function httpError(status, message) {
@@ -320,6 +333,7 @@ async function updateOwnerState(input) {
     residents.push({ ...resident, loginId, ...credentials });
   }
 
+  const existingProofs = new Map(store.bills.map((bill) => [bill.id, bill.paymentProof]).filter(([, proof]) => Boolean(proof)));
   const roomIds = new Set(input.rooms.map((room) => room.id));
   if (residents.some((resident) => resident.roomId && !roomIds.has(resident.roomId))) {
     throw httpError(400, "Kamar penghuni tidak ditemukan.");
@@ -333,7 +347,11 @@ async function updateOwnerState(input) {
     residents,
     payments: input.payments,
     expenses: input.expenses,
-    bills: input.bills,
+    bills: input.bills.map((bill) => {
+      const { paymentProof, ...publicBill } = bill;
+      const existingProof = existingProofs.get(bill.id);
+      return existingProof ? { ...publicBill, paymentProof: existingProof } : publicBill;
+    }),
     maintenanceReports: input.maintenanceReports
   };
   await persistStore();
@@ -404,6 +422,15 @@ async function handleApi(request, response, pathname) {
   }
 
   const session = await requestSession(request);
+  const paymentProofRoute = pathname.match(/^\/api\/bills\/([^/]+)\/proof$/);
+  if (request.method === "GET" && paymentProofRoute) {
+    requireRole(session, "owner");
+    const bill = store.bills.find((item) => item.id === decodeURIComponent(paymentProofRoute[1]));
+    if (!bill) throw httpError(404, "Tagihan tidak ditemukan.");
+    if (!bill.paymentProof) throw httpError(404, "Bukti pembayaran belum dilampirkan.");
+    return sendJson(response, 200, { proof: bill.paymentProof });
+  }
+
   if (request.method === "GET" && pathname === "/api/state") {
     if (!session) throw httpError(401, "Sesi berakhir. Silakan masuk kembali.");
     return sendJson(response, 200, { data: publicState(session) });
@@ -494,9 +521,13 @@ async function handleApi(request, response, pathname) {
       if (session.residentId !== bill.residentId) throw httpError(403, "Tagihan ini bukan milik akun Anda.");
       if (bill.status === "Lunas" || bill.status === "Menunggu konfirmasi") throw httpError(409, "Tagihan ini sudah diperbarui.");
       const input = await readJson(request);
+      if (!["Transfer bank", "Tunai", "E-wallet"].includes(input.method)) throw httpError(400, "Metode pembayaran tidak valid.");
+      const needsProof = input.method === "Transfer bank" || input.method === "E-wallet";
+      const paymentProof = needsProof ? validatePaymentProof(input.paymentProof) : null;
       bill.status = "Menunggu konfirmasi";
-      bill.paymentMethod = String(input.method || "Transfer bank");
+      bill.paymentMethod = input.method;
       bill.paymentNote = String(input.note || "").slice(0, 500);
+      bill.paymentProof = paymentProof;
       bill.requestedAt = currentDate();
     } else {
       requireRole(session, "owner");

@@ -399,7 +399,7 @@ function renderBills() {
       const resident = getResident(bill.residentId);
       const status = billStatus(bill);
       const late = overdueLabel(bill);
-      return `<tr><td class="cell-primary">${escapeHtml(resident?.name || "Penghuni dihapus")}<span class="cell-secondary">Kamar ${escapeHtml(getRoom(resident?.roomId)?.name || "—")}</span></td><td class="cell-primary">${escapeHtml(bill.title)}<span class="cell-secondary">${escapeHtml(bill.category)}</span></td><td>${escapeHtml(formatMonth(bill.month))}</td><td>${formatDate(bill.dueDate)}${late ? `<span class="cell-secondary" style="color:#ba6257">${late}</span>` : ""}</td><td class="cell-primary">${money(bill.amount)}</td><td>${statusPill(status)}</td><td><div class="row-actions">${status === "Menunggu konfirmasi" ? `<button class="row-action" data-action="confirm-bill" data-id="${escapeHtml(bill.id)}">Konfirmasi lunas</button>` : ""}<button class="row-action" data-action="edit-bill" data-id="${escapeHtml(bill.id)}">Edit</button><button class="row-action delete" data-action="delete-bill" data-id="${escapeHtml(bill.id)}">Hapus</button></div></td></tr>`;
+      return `<tr><td class="cell-primary">${escapeHtml(resident?.name || "Penghuni dihapus")}<span class="cell-secondary">Kamar ${escapeHtml(getRoom(resident?.roomId)?.name || "—")}</span></td><td class="cell-primary">${escapeHtml(bill.title)}<span class="cell-secondary">${escapeHtml(bill.category)}</span></td><td>${escapeHtml(formatMonth(bill.month))}</td><td>${formatDate(bill.dueDate)}${late ? `<span class="cell-secondary" style="color:#ba6257">${late}</span>` : ""}</td><td class="cell-primary">${money(bill.amount)}</td><td>${statusPill(status)}${bill.paymentMethod ? `<span class="cell-secondary">${escapeHtml(bill.paymentMethod)}</span>` : ""}</td><td><div class="row-actions">${bill.hasPaymentProof ? `<button class="row-action" data-action="view-payment-proof" data-id="${escapeHtml(bill.id)}">Lihat bukti</button>` : ""}${status === "Menunggu konfirmasi" ? `<button class="row-action" data-action="confirm-bill" data-id="${escapeHtml(bill.id)}">Konfirmasi lunas</button>` : ""}<button class="row-action" data-action="edit-bill" data-id="${escapeHtml(bill.id)}">Edit</button><button class="row-action delete" data-action="delete-bill" data-id="${escapeHtml(bill.id)}">Hapus</button></div></td></tr>`;
     }).join("") : `<tr><td colspan="7"><div class="empty-state"><strong>Belum ada tagihan</strong>Buat tagihan untuk mengirim rincian biaya ke akun penghuni.</div></td></tr>`}</tbody></table></div><div class="table-footer"><span>Tagihan terlambat dihitung otomatis dari tanggal jatuh tempo.</span><strong>${bills.length} tagihan</strong></div></section>`;
 }
 
@@ -671,6 +671,7 @@ function openModal(kind, id = null) {
   const title = kind === "bill-payment" ? "Konfirmasi pembayaran" : `${id ? "Edit" : "Tambah"} ${titleMap[kind][0]}`;
   document.getElementById("modalTitle").textContent = title;
   document.getElementById("modalEyebrow").textContent = `${prefix === "edit" ? "UBAH DATA" : "DATA BARU"} · ${titleMap[kind][1].toUpperCase()}`;
+  document.getElementById("saveModal").hidden = false;
   document.getElementById("saveModal").innerHTML = kind === "bill-payment" ? "Kirim konfirmasi <span>→</span>" : `${id ? "Simpan perubahan" : "Simpan data"} <span>→</span>`;
 
   if (kind === "room") {
@@ -731,7 +732,52 @@ function openModal(kind, id = null) {
     }
     modalFields.innerHTML = `<p class="payment-confirm-copy">Anda akan mengirim konfirmasi pembayaran <strong>${escapeHtml(bill.title)}</strong> sebesar <strong>${money(bill.amount)}</strong>. Owner akan memeriksa pembayaran sebelum menandainya lunas.</p>`
       + field("method", "Metode pembayaran", "select", "Transfer bank", ["Transfer bank", "Tunai", "E-wallet"], true)
+      + `<label class="field full" id="paymentProofField"><span>Bukti transfer / e-wallet <b>*</b></span><input id="paymentProofInput" name="paymentProofFile" type="file" accept="image/jpeg,image/png,image/webp" required><small class="field-hint">Wajib untuk transfer bank dan e-wallet. Format JPG, PNG, atau WebP, maksimal 1 MB.</small><span id="paymentProofName" class="field-hint">Belum ada gambar dipilih.</span><img id="paymentProofPreview" alt="Pratinjau bukti pembayaran" hidden style="max-width:100%;max-height:300px;object-fit:contain;border:1px solid #e9ece5;border-radius:8px"></label>`
       + `<label class="field full"><span>Catatan (opsional)</span><textarea name="note" placeholder="Contoh: transfer dari rekening atas nama ..."></textarea></label>`;
+    const methodSelect = modalFields.querySelector('[name="method"]');
+    const proofField = document.getElementById("paymentProofField");
+    const proofInput = document.getElementById("paymentProofInput");
+    const updateProofRequirement = () => {
+      const needsProof = methodSelect.value !== "Tunai";
+      proofField.hidden = !needsProof;
+      proofField.style.display = needsProof ? "" : "none";
+      proofInput.required = needsProof;
+      if (!needsProof) {
+        proofInput.value = "";
+        document.getElementById("paymentProofName").textContent = "Tunai tidak memerlukan lampiran.";
+        document.getElementById("paymentProofPreview").hidden = true;
+      }
+    };
+    methodSelect.addEventListener("change", updateProofRequirement);
+    proofInput.addEventListener("change", async () => {
+      const file = proofInput.files?.[0];
+      const name = document.getElementById("paymentProofName");
+      const preview = document.getElementById("paymentProofPreview");
+      if (!file) return;
+      if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+        toast("Pilih bukti berupa gambar JPG, PNG, atau WebP.");
+        proofInput.value = "";
+        return;
+      }
+      if (file.size > 1024 * 1024) {
+        toast("Ukuran bukti pembayaran maksimal 1 MB.");
+        proofInput.value = "";
+        return;
+      }
+      try {
+        preview.src = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("Bukti pembayaran tidak dapat dibaca."));
+          reader.readAsDataURL(file);
+        });
+        preview.hidden = false;
+        name.textContent = file.name;
+      } catch (error) {
+        proofInput.value = "";
+        name.textContent = error.message;
+      }
+    });
   } else if (kind === "expense") {
     modalFields.innerHTML = field("title", "Keperluan", "text", item?.title || "", [], true)
       + field("category", "Kategori", "select", item?.category || "Utilitas", ["Utilitas", "Perawatan", "Kebersihan", "Perlengkapan", "Lainnya"])
@@ -766,9 +812,21 @@ async function submitModal(event) {
   const { kind, id } = editing;
   if (kind === "bill-payment") {
     try {
+      const needsProof = values.method !== "Tunai";
+      const proofFile = values.paymentProofFile;
+      if (needsProof && (!proofFile || !proofFile.size)) {
+        toast("Lampirkan bukti pembayaran untuk transfer bank atau e-wallet.");
+        return;
+      }
+      const paymentProof = needsProof ? await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error("Bukti pembayaran tidak dapat dibaca."));
+        reader.readAsDataURL(proofFile);
+      }) : null;
       const result = await apiRequest(`/api/bills/${encodeURIComponent(id)}/pay`, {
         method: "POST",
-        body: JSON.stringify({ method: values.method, note: values.note || "" })
+        body: JSON.stringify({ method: values.method, note: values.note || "", paymentProof })
       });
       data = result.data;
       closeModal();
@@ -889,6 +947,24 @@ async function confirmPayment(id) {
   toast("Pembayaran dikonfirmasi dan dicatat lunas.");
 }
 
+async function viewPaymentProof(id) {
+  try {
+    const result = await apiRequest(`/api/bills/${encodeURIComponent(id)}/proof`);
+    if (typeof result.proof !== "string" || !/^data:image\/(?:jpeg|png|webp);base64,/.test(result.proof)) {
+      throw new Error("Bukti pembayaran tidak valid.");
+    }
+    editing = null;
+    document.getElementById("modalTitle").textContent = "Bukti pembayaran";
+    document.getElementById("modalEyebrow").textContent = "LAMPIRAN PENGHUNI";
+    document.getElementById("saveModal").hidden = true;
+    modalFields.innerHTML = `<img src="${escapeHtml(result.proof)}" alt="Bukti pembayaran penghuni" style="display:block;max-width:100%;max-height:65vh;margin:auto;object-fit:contain;border:1px solid #e9ece5;border-radius:8px">`;
+    modalBackdrop.hidden = false;
+    document.body.style.overflow = "hidden";
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 function exportReport() {
   const payments = data.payments.filter((payment) => payment.month === reportMonth);
   const expenses = data.expenses.filter((expense) => expense.date.slice(0, 7) === reportMonth);
@@ -930,6 +1006,7 @@ pageContent.addEventListener("click", (event) => {
   else if (target.dataset.action === "delete-bill") deleteRecord("bill", target.dataset.id);
   else if (target.dataset.action === "pay-bill") openModal("bill-payment", target.dataset.id);
   else if (target.dataset.action === "confirm-bill") confirmBill(target.dataset.id);
+  else if (target.dataset.action === "view-payment-proof") viewPaymentProof(target.dataset.id);
   else if (target.dataset.action === "confirm-payment") confirmPayment(target.dataset.id);
   else if (verb === "add") openModal(kind);
   else if (verb === "edit") openModal(kind, target.dataset.id);
