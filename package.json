@@ -1,0 +1,9 @@
+{
+  "name": "ruangkos",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Aplikasi sederhana untuk mengelola operasional kos.",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
